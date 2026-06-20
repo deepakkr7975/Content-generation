@@ -13,7 +13,10 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -138,6 +141,11 @@ class ContentState(TypedDict):
     validation_error: Optional[str]
     retry_count: int
     saved_path: Optional[str]
+    # Scheduling fields (optional — only used in scheduled mode)
+    topics: Optional[list]             # Full topics list from topics.json
+    topics_file: Optional[str]         # Path to topics.json
+    interval_seconds: Optional[int]    # Seconds between generations
+    current_index: Optional[int]       # Index of current topic in list
 
 
 # ── Nodes ────────────────────────────────────────────────────────────────────
@@ -190,7 +198,6 @@ def validate_node(state: ContentState) -> dict:
 
     content = state.get("generated_content")
     tag = state["tag"]
-    topic_slug = state["topic_slug"]
 
     if content is None:
         return {
@@ -199,15 +206,12 @@ def validate_node(state: ContentState) -> dict:
         }
 
     try:
-        # Re-validate through Pydantic
         topic = TopicContent.model_validate(content)
 
-        # For ai-systems, strip steps
         if tag == "ai-systems" and topic.steps is not None:
             topic.steps = None
             content = topic.model_dump(exclude_none=True)
 
-        # Quick sanity checks
         checks = []
         if len(topic.takeaways) < 3:
             checks.append(f"Only {len(topic.takeaways)} takeaways (need 3+)")
@@ -257,28 +261,70 @@ def save_node(state: ContentState) -> dict:
     tag = state["tag"]
     content = state["generated_content"]
 
-    # Ensure output directory exists
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
     file_path = OUTPUT_FILES[tag]
 
-    # Load existing data or start fresh
     if file_path.exists():
         data = json.loads(file_path.read_text())
     else:
         data = {}
 
-    # Append the new topic
     data[topic_slug] = content
-
-    # Write back
     file_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
     total = len(data)
     print(f"\n Saved to: {file_path}")
     print(f"   Total topics in file: {total}")
 
+    # If in scheduled mode, mark topic as done in topics.json
+    topics = state.get("topics")
+    idx = state.get("current_index")
+    if topics is not None and idx is not None:
+        topics[idx]["status"] = "done"
+        topics[idx]["completed_at"] = datetime.now().isoformat()
+        topics_file = Path(state["topics_file"])
+        save_topics(topics_file, topics)
+
     return {"saved_path": str(file_path)}
+
+
+def schedule_node(state: ContentState) -> dict:
+    """Wait for the scheduled interval, then load the next pending topic."""
+
+    topics = state.get("topics")
+    interval = state.get("interval_seconds", 0)
+
+    if topics is None:
+        # Single-topic mode — no scheduling, just end
+        return {}
+
+    # Find next pending topic
+    start = state.get("current_index", -1) + 1
+    for i in range(start, len(topics)):
+        if topics[i].get("status") not in ("done", "failed", "error"):
+            # Wait for interval before next topic
+            if interval > 0:
+                interval_str = f"{interval // 3600}h" if interval >= 3600 else f"{interval // 60}m"
+                now = datetime.now().strftime("%H:%M:%S")
+                print(f"\n  [{now}] Waiting {interval_str} before next topic...")
+                time.sleep(interval)
+
+            slug = topics[i]["slug"]
+            tag = topics[i]["tag"]
+            now = datetime.now().strftime("%H:%M:%S")
+            print(f"\n  [{now}] Next: '{slug}' ({tag})")
+
+            return {
+                "current_index": i,
+                "topic_slug": slug,
+                "tag": tag,
+                "generated_content": None,
+                "validation_error": None,
+                "retry_count": 0,
+            }
+
+    print(f"\n  All topics processed!")
+    return {}
 
 
 # ── Routing ──────────────────────────────────────────────────────────────────
@@ -299,31 +345,156 @@ def should_retry_or_save(state: ContentState) -> str:
     return END
 
 
+def should_schedule_or_end(state: ContentState) -> str:
+    """Route after save: go to schedule (if more pending topics) or END."""
+
+    topics = state.get("topics")
+    if topics is None:
+        return END  # single-topic mode → done
+
+    # Check if there are more pending topics after the current one
+    start = state.get("current_index", -1) + 1
+    for i in range(start, len(topics)):
+        if topics[i].get("status") not in ("done", "failed", "error"):
+            return "schedule"  # more topics → go to schedule node
+
+    return END  # all topics processed
+
+
 # ── Graph Construction ───────────────────────────────────────────────────────
 
 
-def build_graph() -> StateGraph:
-    """Build and compile the LangGraph content generation agent."""
+def build_graph():
+    """Build the content generation graph with optional scheduling node.
 
-    graph = StateGraph(ContentState)
+    Graph structure:
+        START → generate → validate →[retry?]→ generate (loop)
+                                    →[ok?]→ save
+        save →[schedule mode + more topics?]→ schedule → generate (loop)
+            →[single topic / all done?]→ END
+    """
 
-    # Add nodes
-    graph.add_node("generate", generate_node)
-    graph.add_node("validate", validate_node)
-    graph.add_node("save", save_node)
+    g = StateGraph(ContentState)
 
-    # Define edges
-    graph.set_entry_point("generate")
-    graph.add_edge("generate", "validate")
-    graph.add_conditional_edges("validate", should_retry_or_save)
-    graph.add_edge("save", END)
+    g.add_node("generate", generate_node)
+    g.add_node("validate", validate_node)
+    g.add_node("save", save_node)
+    g.add_node("schedule", schedule_node)
 
-    return graph.compile()
+    g.set_entry_point("generate")
+    g.add_edge("generate", "validate")
+    g.add_conditional_edges("validate", should_retry_or_save, {
+        "save": "save",
+        "generate": "generate",
+        END: END,
+    })
+    g.add_conditional_edges("save", should_schedule_or_end, {
+        "schedule": "schedule",
+        END: END,
+    })
+    g.add_edge("schedule", "generate")   # schedule always loops back
+
+    return g.compile()
 
 
 # ── Compiled graph (for langgraph dev / LangSmith Studio) ────────────────────
 
 graph = build_graph()
+
+
+# ── Scheduler ────────────────────────────────────────────────────────────────
+
+TOPICS_FILE = HERE / "topics.json"
+
+
+def parse_interval(interval_str: str) -> int:
+    """Parse interval string like '2h', '30m', '10h' into seconds."""
+    match = re.match(r"^(\d+)\s*(h|hr|hrs|hours?|m|min|mins|minutes?)$", interval_str.lower().strip())
+    if not match:
+        raise ValueError(
+            f"Invalid interval '{interval_str}'. "
+            f"Use format like: 30m, 1h, 2h, 10h"
+        )
+    value = int(match.group(1))
+    unit = match.group(2)[0]  # 'h' or 'm'
+    return value * 3600 if unit == "h" else value * 60
+
+
+def load_topics(topics_file: Path) -> list:
+    """Load topics list from JSON file."""
+    if not topics_file.exists():
+        print(f"  Topics file not found: {topics_file}")
+        sys.exit(1)
+    data = json.loads(topics_file.read_text())
+    return data.get("topics", [])
+
+
+def save_topics(topics_file: Path, topics: list) -> None:
+    """Save updated topics list back to JSON file."""
+    data = {"topics": topics}
+    topics_file.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+def run_scheduled(interval_str: str, topics_file: Path) -> None:
+    """Run the agent on a schedule using the graph's schedule node."""
+
+    interval_secs = parse_interval(interval_str)
+    topics = load_topics(topics_file)
+
+    pending = [t for t in topics if t.get("status") != "done"]
+
+    if not pending:
+        print(f"\n  All topics in {topics_file.name} are already done!")
+        return
+
+    # Find first pending topic
+    first_slug, first_tag, first_idx = "", "", 0
+    for i, t in enumerate(topics):
+        if t.get("status") not in ("done", "failed", "error"):
+            first_slug = t["slug"]
+            first_tag = t["tag"]
+            first_idx = i
+            break
+
+    print(f"\n{'='*60}")
+    print(f"  ReinforcedX Content Agent — Scheduled Mode")
+    print(f"  Interval:      {interval_str} ({interval_secs}s)")
+    print(f"  Topics file:   {topics_file.name}")
+    print(f"  Total topics:  {len(topics)}")
+    print(f"  Pending:       {len(pending)}")
+    print(f"{'='*60}")
+
+    app = build_graph()
+
+    # Run the graph — the schedule node handles the loop + waiting
+    initial_state: ContentState = {
+        "topic_slug": first_slug,
+        "tag": first_tag,
+        "generated_content": None,
+        "validation_error": None,
+        "retry_count": 0,
+        "saved_path": None,
+        "topics": topics,
+        "topics_file": str(topics_file),
+        "interval_seconds": interval_secs,
+        "current_index": first_idx,
+    }
+
+    try:
+        final_state = app.invoke(initial_state)
+    except KeyboardInterrupt:
+        print(f"\n  Scheduler stopped by user. Progress saved to {topics_file.name}.")
+        return
+
+    # Final summary
+    done = sum(1 for t in topics if t.get("status") == "done")
+    failed = sum(1 for t in topics if t.get("status") in ("failed", "error"))
+    print(f"\n{'='*60}")
+    print(f"  Schedule complete!")
+    print(f"  Done:   {done}/{len(topics)}")
+    if failed:
+        print(f"  Failed: {failed}/{len(topics)}")
+    print(f"{'='*60}\n")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -333,22 +504,48 @@ def main():
     parser = argparse.ArgumentParser(
         description="LangGraph Content Generation Agent for ReinforcedX"
     )
+
+    # Single topic mode
     parser.add_argument(
         "topic",
+        nargs="?",
+        default=None,
         help='Topic slug, e.g. "prompt-engineering-techniques"',
     )
     parser.add_argument(
         "--tag",
         choices=["ai-systems", "how-to"],
-        required=True,
         help="Content type: ai-systems (conceptual) or how-to (guide)",
     )
+
+    # Scheduled mode
+    parser.add_argument(
+        "--schedule",
+        metavar="INTERVAL",
+        help='Run in scheduled mode. Interval like "30m", "1h", "2h", "10h"',
+    )
+    parser.add_argument(
+        "--topics-file",
+        default=str(TOPICS_FILE),
+        help=f"Path to topics JSON file (default: {TOPICS_FILE.name})",
+    )
+
     args = parser.parse_args()
 
-    # Build the graph
+    # ── Scheduled mode ──
+    if args.schedule:
+        topics_file = Path(args.topics_file)
+        run_scheduled(args.schedule, topics_file)
+        return
+
+    # ── Single topic mode ──
+    if not args.topic:
+        parser.error("Provide a topic slug, or use --schedule for scheduled mode.")
+    if not args.tag:
+        parser.error("--tag is required for single topic mode.")
+
     app = build_graph()
 
-    # Initial state
     initial_state: ContentState = {
         "topic_slug": args.topic,
         "tag": args.tag,
@@ -359,20 +556,18 @@ def main():
     }
 
     print(f"\n{'='*60}")
-    print(f"  🤖 ReinforcedX Content Agent (LangGraph)")
+    print(f"  ReinforcedX Content Agent (LangGraph)")
     print(f"  Topic: {args.topic}")
     print(f"  Tag:   {args.tag}")
     print(f"{'='*60}")
 
-    # Run the graph
     final_state = app.invoke(initial_state)
 
-    # Summary
     print(f"\n{'='*60}")
     if final_state.get("saved_path"):
-        print(f"  ✅ Done! Content saved to: {final_state['saved_path']}")
+        print(f"   Done! Content saved to: {final_state['saved_path']}")
     else:
-        print(f"  ❌ Failed to generate content after {MAX_RETRIES} retries.")
+        print(f"  Failed to generate content after {MAX_RETRIES} retries.")
     print(f"{'='*60}\n")
 
 

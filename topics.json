@@ -1,0 +1,38 @@
+{
+  "topics": [
+    {
+      "slug": "transformer-attention-mechanisms",
+      "tag": "ai-systems",
+      "status": "done",
+      "completed_at": "2026-06-19T17:03:26.765311"
+    },
+    {
+      "slug": "llm-fine-tuning-strategies",
+      "tag": "ai-systems",
+      "status": "done",
+      "completed_at": "2026-06-19T17:04:50.524399"
+    },
+    {
+      "slug": "build-custom-ai-code-reviewer",
+      "tag": "how-to",
+      "status": "done",
+      "completed_at": "2026-06-19T17:06:12.242964"
+    },
+    {
+      "slug": "implement-tool-use-in-ai-agents",
+      "tag": "how-to",
+      "status": "done",
+      "completed_at": "2026-06-20T20:11:37.732784"
+    },
+    {
+      "slug": "tokenization-and-embeddings-deep-dive",
+      "tag": "ai-systems",
+      "status": "done",
+      "completed_at": "2026-06-20T20:12:54.331746"
+    },
+    {
+      "slug": "set-up-mlops-pipeline-for-llms",
+      "tag": "how-to"
+    }
+  ]
+}
