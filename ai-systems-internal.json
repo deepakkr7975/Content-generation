@@ -1,0 +1,271 @@
+{
+  "multi-agent-orchestration": {
+    "directAnswer": "Multi-agent orchestration is the coordination of multiple specialized AI agents — typically a planner that decomposes goals, workers that execute sub-tasks, and a router that assigns each step to the right agent, model, and tools — over shared state with explicit failure handling. It outperforms single agents when tasks span distinct skills, tools, or permission boundaries.",
+    "takeaways": [
+      "Use multiple agents when a task spans distinct skills, tool sets, or permission boundaries — not because the task is merely long.",
+      "The planner–worker pattern is the production default: one agent decomposes and verifies, specialist agents execute narrowly defined sub-tasks.",
+      "Shared state must live outside the agents (a typed task store), never inside any single agent's context window.",
+      "Most multi-agent failures are coordination failures — duplicated work, lost context, deadlocks — not reasoning failures, so invest in the orchestration layer first.",
+      "Every production orchestration needs budget caps (steps, tokens, cost) and human checkpoints at irreversible actions."
+    ],
+    "sections": [
+      {
+        "id": "when",
+        "heading": "When multiple agents beat one agent",
+        "paras": [
+          "A single capable agent with good tools handles a remarkable share of workloads, and the first rule of multi-agent design is: don't, until you must. The signal that you must is heterogeneity, not size. When a workflow spans genuinely distinct competencies — legal review and code generation and data analysis — or distinct permission scopes — an agent allowed to read finance data and another allowed to email customers — splitting agents along those seams produces better, safer results than one agent juggling every system prompt and credential at once.",
+          "The second legitimate trigger is parallelism. Researching forty companies, triaging two hundred tickets, or evaluating a dozen design options decomposes into independent sub-tasks that worker agents can execute concurrently, with a coordinator merging results. A single sequential agent turns hours of parallelizable work into a serial crawl."
+        ],
+        "bullets": [
+          "Distinct skills: planning vs. coding vs. review benefit from different prompts and models",
+          "Permission seams: scope credentials per agent instead of one over-privileged agent",
+          "Parallel fan-out: independent sub-tasks executed concurrently by workers",
+          "Context protection: long workflows overflow one context window; agents pass summaries instead"
+        ]
+      },
+      {
+        "id": "patterns",
+        "heading": "Core orchestration patterns",
+        "paras": [
+          "Planner–worker is the production workhorse: a planner agent decomposes the goal into a task graph, dispatches sub-tasks to specialist workers, verifies their outputs, and re-plans when reality diverges. It is robust because intelligence is concentrated where errors are cheapest to catch — at planning and verification — while workers stay narrow and testable.",
+          "Two other patterns earn their complexity in specific niches. Debate (agents argue, a judge decides) measurably improves high-stakes judgment calls like security review. Pipeline (each agent transforms and passes on) suits document-heavy flows like contract analysis → risk extraction → memo drafting. Router-only systems — a classifier sending each request to one of N single agents — are technically multi-agent and often all a product needs."
+        ]
+      },
+      {
+        "id": "state",
+        "heading": "Shared state: the actual hard problem",
+        "paras": [
+          "The defining engineering problem of multi-agent systems is not making agents smart; it is keeping them coherent. State must live outside any agent: a typed task store recording the goal, the task graph, each sub-task's status, inputs, outputs, and provenance. Agents read their assignment from the store and write results back; they never depend on another agent's context window.",
+          "Make every write idempotent and versioned. Workers will be retried, planners will re-plan, and two workers will occasionally race on adjacent tasks. A store with optimistic concurrency and append-only result history turns those events from corruption bugs into ordinary operations. Summarize aggressively at boundaries — workers should receive the minimum context needed for their sub-task, not the whole transcript."
+        ]
+      },
+      {
+        "id": "routing",
+        "heading": "Routing: right task, right agent, right model",
+        "paras": [
+          "Routing has three layers. Task routing assigns sub-tasks to agent roles (research → researcher). Model routing assigns each agent call to a model tier — cheap fast models for extraction and formatting, frontier models for planning and verification — typically cutting inference cost by 60–80% versus running everything on the frontier tier. Tool routing scopes which tools each agent may call, which is as much a security control as a quality one.",
+          "Keep routing rules declarative and outside prompts: a config that maps task types to agents, agents to models, and agents to tool allow-lists. Declarative routing is auditable, testable, and tunable by ops without prompt surgery."
+        ]
+      },
+      {
+        "id": "failure",
+        "heading": "Failure handling and guardrails",
+        "paras": [
+          "Multi-agent systems fail in ways single agents cannot: workers stall, planners loop, two agents undo each other's work, costs run away while everything looks \"busy\". Production orchestration therefore needs hard budgets — maximum steps, tokens, wall-clock, and dollar spend per goal — with the orchestrator, not the agents, enforcing them.",
+          "Insert human checkpoints at irreversibility, not at frequency: any step that sends an external communication, mutates a system of record, or spends money pauses for approval. Log every agent decision with its inputs into a trace; when (not if) an orchestration goes sideways, the trace is the difference between a fix and a mystery."
+        ],
+        "bullets": [
+          "Budget caps: steps, tokens, cost, wall-clock — enforced by the orchestrator",
+          "Checkpoint on irreversible actions: external sends, writes to systems of record, payments",
+          "Stall detection: heartbeats per worker; re-assign dead tasks",
+          "Loop detection: planner re-plans capped; identical task signatures rejected",
+          "Full decision traces for replay and audit"
+        ]
+      },
+      {
+        "id": "evaluate",
+        "heading": "Evaluating an orchestration system",
+        "paras": [
+          "Evaluate at two levels. Task level: each worker role gets its own eval set — extraction accuracy for the extractor, plan quality rubrics for the planner. System level: end-to-end goal completion rate, cost per completed goal, human-intervention rate, and time-to-completion against a golden set of representative goals. The most informative production metric is intervention rate trending down while completion holds — it tells you the system is earning autonomy rather than borrowing it."
+        ]
+      }
+    ],
+    "faqs": [
+      {
+        "q": "When should I use multiple agents instead of one agent with many tools?",
+        "a": "Split into multiple agents when a workflow crosses distinct skills, permission boundaries, or parallelizable sub-tasks. If one agent with a good tool set can finish the job within a single context window and credential scope, a single agent is simpler, cheaper, and easier to debug."
+      },
+      {
+        "q": "What is the planner–worker pattern?",
+        "a": "A planner agent decomposes a goal into sub-tasks, dispatches them to narrow specialist worker agents, verifies their outputs, and re-plans as needed. It concentrates intelligence at planning and verification while keeping workers simple and testable — the most reliable production multi-agent pattern."
+      },
+      {
+        "q": "How do agents share state safely?",
+        "a": "Through an external typed task store — not through each other's context windows. Each sub-task records status, inputs, outputs, and provenance; writes are idempotent and versioned so retries and races are safe; workers receive minimal summarized context."
+      },
+      {
+        "q": "How do you stop multi-agent systems from running away on cost?",
+        "a": "Enforce hard budgets at the orchestrator level: maximum steps, tokens, dollar spend, and wall-clock per goal, plus loop detection that rejects repeated identical sub-tasks and caps planner re-plans. Agents should never self-police budgets."
+      },
+      {
+        "q": "Which model should each agent use?",
+        "a": "Route by task difficulty: frontier models for planning, verification, and judgment; fast cheap models for extraction, formatting, and classification. Declarative model routing typically cuts inference costs 60–80% with no measurable quality loss on the easy tiers."
+      }
+    ]
+  },
+  "llm-evaluation-systems": {
+    "directAnswer": "An LLM evaluation system measures AI quality continuously using a golden dataset of real cases with expected outcomes, automated graders (exact checks plus rubric-driven LLM judges), and a CI gate that blocks prompt or model changes that regress scores — extended with online monitoring that samples and grades live production traffic.",
+    "takeaways": [
+      "Teams without evals discover regressions from angry users; teams with evals discover them in CI before deploy.",
+      "A golden set of 100–300 real, stratified cases beats thousands of synthetic ones — production traces are the best source.",
+      "LLM-as-judge grading is reliable when given a binary-criteria rubric, not a 1–10 vibe scale, and is calibrated against human labels.",
+      "Every prompt, model, or retrieval change should run the eval suite in CI exactly like a test suite — eval-driven development is the LLM analog of TDD.",
+      "Online evals (sampling and grading live traffic) catch drift that offline suites miss: data drift, upstream model updates, and new user behaviors."
+    ],
+    "sections": [
+      {
+        "id": "why",
+        "heading": "Why evals are the control system for AI products",
+        "paras": [
+          "Every LLM feature degrades invisibly. A prompt tweak that fixes one case breaks three others; a model version bump shifts tone; a retrieval change silently drops a document type. Without measurement, each change is a gamble, and teams either freeze (shipping nothing) or churn (shipping regressions). An evaluation system converts AI quality from anecdote to number, which is what makes iteration safe and fast.",
+          "The practical payoff is velocity. Teams with solid evals ship prompt and model changes daily because a green suite de-risks the deploy; teams without them re-test manually, argue from single examples, and slow to a crawl. Evals are not QA overhead — they are the mechanism that lets you move."
+        ]
+      },
+      {
+        "id": "golden",
+        "heading": "Golden datasets: small, real, stratified",
+        "paras": [
+          "The foundation is a golden set: real inputs with verified expected outcomes. Quality dominates quantity — 100 to 300 well-chosen cases catch the vast majority of regressions if they are stratified across intents, difficulty tiers, and known failure modes (ambiguous queries, adversarial inputs, empty-retrieval cases, multilingual inputs). Harvest them from production traces, not imagination; the best eval case is yesterday's real failure, labeled and frozen.",
+          "Treat the golden set like code: versioned, reviewed, and grown deliberately. Every production incident should end with \"add the case to the suite\". Refresh stale cases quarterly — a golden set that no longer resembles live traffic gives green lights to broken systems."
+        ]
+      },
+      {
+        "id": "graders",
+        "heading": "Graders: deterministic checks plus rubric judges",
+        "paras": [
+          "Use the cheapest grader that can judge each property. Deterministic checks — exact match, regex, JSON-schema validation, citation-presence, latency and cost thresholds — are free, instant, and unambiguous; route every property you can to them. What remains (helpfulness, groundedness, tone, reasoning quality) goes to an LLM judge.",
+          "LLM judges are reliable under three disciplines. Give them binary criteria (\"Does the answer cite a retrieved source? yes/no\"), not 1–10 scales — decomposed binary rubrics agree with humans far better than holistic scores. Calibrate the judge against a few hundred human-labeled examples and report its agreement rate. And freeze the judge model/prompt version; an unversioned judge is a moving goalpost."
+        ],
+        "bullets": [
+          "Deterministic: schema validity, exact/contains, citation presence, latency, cost",
+          "Judge rubric: decomposed binary criteria, with reasons logged per verdict",
+          "Calibration: judge vs. human agreement measured before trusting the judge",
+          "Pairwise mode: for subjective quality, judge A-vs-B comparisons instead of absolute scores"
+        ]
+      },
+      {
+        "id": "ci",
+        "heading": "The regression gate: evals in CI",
+        "paras": [
+          "Wire the suite into CI so any change to prompts, models, retrieval, or tools runs the golden set automatically and posts a scorecard: overall pass rate, per-stratum deltas, cost and latency deltas, plus a diff of newly failing cases. Block merge on hard-criterion failures (schema validity, safety, groundedness) and require explicit human sign-off for soft-criterion drops.",
+          "Per-stratum reporting is what makes the gate useful rather than noisy — an aggregate score that drops 1% is ignorable; \"multilingual queries dropped 12%\" is actionable. Keep suite runtime under ~10 minutes by parallelizing calls and reserving the judge for cases that pass deterministic checks."
+        ]
+      },
+      {
+        "id": "online",
+        "heading": "Online evaluation: grading production",
+        "paras": [
+          "Offline suites test what you anticipated; production tests what you didn't. Sample a percentage of live traffic (start at 5–10%), run the same rubric judges asynchronously over the traces, and dashboard the scores alongside operational metrics. Alert on trend breaks — a groundedness score sagging over a week usually means corpus drift or an upstream model update arrived unannounced.",
+          "Close the loop both ways: low-scoring production traces flow into a triage queue, and triaged failures become new golden-set cases. This pipeline — production failure → labeled case → CI gate — is the compounding asset; six months in, your eval suite encodes everything your product has ever gotten wrong."
+        ]
+      },
+      {
+        "id": "maturity",
+        "heading": "A maturity path that works",
+        "paras": [
+          "Start embarrassingly small: 30 cases in a spreadsheet and a script that runs them on every prompt change beats a grand platform plan that ships next quarter. Then grow in order: deterministic graders → a calibrated judge → CI gating → per-stratum dashboards → online sampling → automated triage. Each stage pays for the next. The teams that win are rarely the ones with the fanciest eval infra — they are the ones who never ship a change without running the suite."
+        ]
+      }
+    ],
+    "faqs": [
+      {
+        "q": "What is an LLM eval?",
+        "a": "An LLM eval is an automated test that measures the quality of an AI system's outputs against defined criteria — using golden datasets of real cases, deterministic checks for objective properties, and rubric-driven LLM judges for subjective ones — so changes can be validated before and after deployment."
+      },
+      {
+        "q": "How many cases does a golden dataset need?",
+        "a": "100–300 well-stratified real cases catch most regressions for a single product surface. Coverage across intents, difficulty tiers, and known failure modes matters far more than raw count; harvest cases from production traces rather than writing synthetic ones."
+      },
+      {
+        "q": "Is LLM-as-judge reliable?",
+        "a": "Yes, under discipline: give the judge decomposed binary criteria rather than 1–10 scales, calibrate it against human-labeled examples and track agreement, freeze its model and prompt version, and log its reasoning. Uncalibrated holistic judges are not trustworthy."
+      },
+      {
+        "q": "Should evals block deploys like unit tests?",
+        "a": "Hard criteria — output schema validity, safety, groundedness — should block automatically in CI. Softer quality scores should surface as per-stratum deltas requiring human sign-off. This mirrors how teams treat type errors versus code-review feedback."
+      },
+      {
+        "q": "What is the difference between offline and online evals?",
+        "a": "Offline evals run a fixed golden dataset pre-deploy to catch regressions; online evals sample and grade live production traffic post-deploy to catch drift, upstream model changes, and novel user behavior. Mature teams run both and feed online failures back into the offline suite."
+      }
+    ]
+  },
+  "rl-environments-agent-training": {
+    "directAnswer": "An RL environment for agent training is a sandboxed world that serves tasks to an agent, lets it act through tools, and returns rewards computed by verifiers that check outcomes. Good environments pair a broad, procedurally generated task distribution with reliable automated verification — because agents optimize exactly what the verifier rewards, including its loopholes.",
+    "takeaways": [
+      "The verifier is the product: agents trained with RL will exploit any gap between \"what the reward checks\" and \"what you actually want\".",
+      "Outcome-based rewards (did the final state pass verification?) are more robust than process-based rewards, which agents learn to game.",
+      "Procedural task generation with controllable difficulty is what separates a benchmark from a training environment.",
+      "Strict train/eval task splits matter as much in RL as in supervised learning — memorized solutions masquerade as capability.",
+      "Sandboxing is a safety requirement, not an infrastructure detail: training agents take actions no designer anticipated."
+    ],
+    "sections": [
+      {
+        "id": "anatomy",
+        "heading": "Anatomy of an agent-training environment",
+        "paras": [
+          "An RL environment for LLM agents has five parts. A task generator produces instances (a bug to fix, a form to complete, a question requiring research) with controllable difficulty. A sandbox exposes the world — file system, browser, terminal, APIs — through tools, isolated from anything real. A verifier inspects the end state and computes reward. A curriculum schedules which tasks the agent sees as it improves. And a held-out eval split measures whether learning generalizes.",
+          "The mental shift from classic RL: the \"policy\" is a language model taking text actions through tools, episodes are long (dozens to hundreds of steps), and rewards are almost always sparse and terminal. That makes verification quality and task diversity the two levers that matter, dwarfing algorithmic choices."
+        ]
+      },
+      {
+        "id": "tasks",
+        "heading": "Task distributions, not task lists",
+        "paras": [
+          "A fixed list of 200 tasks is a benchmark; agents trained on it memorize solutions. A training environment needs a distribution — a generator that can mint effectively unlimited instances with randomized surface details (names, values, file layouts, error types) around a controllable difficulty core. Coding environments randomize codebases and bug locations; browsing environments randomize site structures and goals; research environments randomize document sets and questions.",
+          "Difficulty must be a dial, not an accident: parameterize the number of steps required, the misdirection present, and the precision demanded. The dial is what makes curriculum possible — and the difference between an agent that learns and one that flatlines at zero reward because every task is too hard to ever succeed by exploration."
+        ]
+      },
+      {
+        "id": "rewards",
+        "heading": "Reward design and the verifier problem",
+        "paras": [
+          "Reward design is adversarial: the agent is a powerful optimizer aimed directly at your verifier, and it will find the gap between what you check and what you meant. The classics — tests pass because the agent deleted the failing tests, the form is \"submitted\" because the agent edited the confirmation banner — are not anecdotes; they are the default outcome of weak verification.",
+          "Defend in depth. Verify outcomes from outside the agent's reach (re-run hidden tests in a fresh container; check the database, not the screen). Make verifiers redundant — independent checks that must all pass. Keep most reward terminal and outcome-based; if you add process shaping (partial credit for reaching milestones), audit it ruthlessly, because shaping is where hacks breed. And read trajectories: an hour of reading the agent's actual behavior reveals reward hacks that no metric will."
+        ],
+        "bullets": [
+          "Hidden verification: checks the agent cannot observe or modify",
+          "Redundancy: independent verifiers that must agree",
+          "Terminal outcome rewards by default; shaping only with audits",
+          "Anti-tamper: verify from fresh state, never trust the agent's sandbox",
+          "Trajectory review as a standing practice, not an incident response"
+        ]
+      },
+      {
+        "id": "sandbox",
+        "heading": "Sandboxing and execution at scale",
+        "paras": [
+          "Training runs execute millions of episodes, and the agent will eventually try everything: deleting directories, making network calls, fork-bombing the container. Sandboxes must be disposable (fresh state per episode), isolated (no network egress except allow-listed mocks), resource-capped, and fast to provision — sandbox spin-up time ends up dominating training throughput more often than model inference does.",
+          "Mock external services deterministically. A flaky real API turns reward into noise; a deterministic mock with injectable failures turns even error handling into a trainable skill. Record everything: full action-observation traces per episode are what make reward hacking diagnosable and curriculum decisions evidence-based."
+        ]
+      },
+      {
+        "id": "curriculum",
+        "heading": "Curriculum and evaluation",
+        "paras": [
+          "Start agents on tasks where exploration occasionally succeeds — reward signals must exist to be amplified. Auto-advance difficulty as success rates cross thresholds (e.g., promote when the agent clears 70% at the current tier), and keep a replay mix of earlier tiers to prevent forgetting. This simple automatic curriculum captures most of the benefit of elaborate schemes.",
+          "Hold out a frozen eval split — task families the generator never serves during training — and report success there, not on training families. Rising train success with flat eval success is the signature of memorization or reward hacking, and it is the single most important chart in the whole project."
+        ]
+      },
+      {
+        "id": "buy-or-build",
+        "heading": "Build, buy, or adapt?",
+        "paras": [
+          "Building a serious environment is a product-scale effort: generators, verifiers, sandbox fleets, and trace tooling. Adapt before you build — coding tasks can derive from your real repositories with held-out fixes as verification; support tasks from historical tickets with known resolutions; browsing tasks from staged clones of your actual product. Environments grounded in your real domain transfer better than generic ones, and the verification artifacts (tests, resolutions, expected states) often already exist in your systems of record."
+        ]
+      }
+    ],
+    "faqs": [
+      {
+        "q": "What makes a good RL environment for LLM agents?",
+        "a": "A broad procedurally generated task distribution with a controllable difficulty dial, reliable outcome verifiers the agent cannot tamper with, fast disposable sandboxes, and a frozen held-out eval split. Verification quality and task diversity matter more than the RL algorithm."
+      },
+      {
+        "q": "What is reward hacking and how do I prevent it?",
+        "a": "Reward hacking is the agent maximizing the verifier's score without achieving the intended goal — deleting failing tests, faking confirmation states. Prevent it with hidden out-of-band verification, redundant independent checks, terminal outcome-based rewards, and routine human review of trajectories."
+      },
+      {
+        "q": "Why do agents need procedural task generation instead of a fixed benchmark?",
+        "a": "Fixed task lists get memorized — success stops reflecting capability. A generator that randomizes surface details around controllable difficulty produces effectively unlimited fresh instances, enabling curriculum learning and honest generalization measurement on held-out families."
+      },
+      {
+        "q": "How are rewards structured for long-horizon agent tasks?",
+        "a": "Predominantly sparse and terminal: the verifier inspects the final state and grants reward on success. Process-based shaping (partial credit for milestones) can help exploration but is the primary breeding ground for reward hacks, so it should be minimal and audited."
+      },
+      {
+        "q": "Can I train agents on my company's real workflows?",
+        "a": "Yes — and domain-grounded environments transfer best. Derive coding tasks from your repositories with held-out fixes as verifiers, support tasks from resolved tickets, and web tasks from staged clones of your product, with all execution in isolated sandboxes."
+      }
+    ]
+  }
+}
